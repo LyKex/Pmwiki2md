@@ -3,24 +3,56 @@ import re
 from typing import List, Dict, Set, Tuple
 import argparse
 
+# Constants
+SUPPORTED_COLORS = ['red', 'blue', 'green', 'black']
+IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'tif', 'tiff'}
+CODE_BLOCK_MARKER = "XXXCODEBLOCKXXX"
+
 def pm2md(pm_dir: str, filename: str, pages: Dict[str, Set[str]]) -> str:
+    """Convert PmWiki formatted text to Markdown.
+    
+    Args:
+        pm_dir: Directory containing PmWiki files
+        filename: Name of file to convert
+        pages: Dictionary mapping book names to sets of page names
+    
+    Returns:
+        Converted markdown text
+    """
     with open(os.path.join(pm_dir, filename), 'r', encoding='utf-8') as f:
         text = f.read()
 
-    # Handle preformatted text (code blocks)
     lines = text.split('\n')
+    codes = extract_code_blocks(lines)
+    text = '\n'.join(lines)
+    
+    text = apply_text_formatting(text)
+    text = process_links_and_formatting(text, filename, pages)
+    
+    # Process tables and directives
+    lines = text.split('\n')
+    lines = process_blocks(lines)
+    lines = restore_code_blocks(lines, codes)
+    
+    return '\n'.join(lines)
+
+def extract_code_blocks(lines: List[str]) -> List[str]:
+    """Extract code blocks from text and replace with markers."""
     codes = []
     is_code = False
     for i in range(len(lines)):
         if lines[i].startswith(' ') or (is_code and not lines[i]):
             is_code = True
             codes.append(lines[i])
-            lines[i] = "XXXCODEBLOCKXXX"
+            lines[i] = CODE_BLOCK_MARKER
         else:
             is_code = False
-    text = '\n'.join(lines)
+    return codes
 
+def apply_text_formatting(text: str) -> str:
+    """Apply basic text formatting conversions."""
     tab = "  "
+    
     # Bullet points
     text = re.sub(r'^(\s*)(\*+) ?(.*)', 
                   lambda m: " " * len(m.group(1)) + tab * (len(m.group(2)) - 1) + "- " + m.group(3), 
@@ -69,8 +101,12 @@ def pm2md(pm_dir: str, filename: str, pages: Dict[str, Set[str]]) -> str:
     text = re.sub(r'(?<!\\)\\{2}$', r'\\', text, flags=re.MULTILINE)
     text = re.sub(r'(?<!\\)\\{3}$', r'\n\n', text, flags=re.MULTILINE)
 
+    return text
+
+def process_links_and_formatting(text: str, filename: str, pages: Dict[str, Set[str]]) -> str:
+    """Process links and additional formatting."""
     # Colors
-    for color in ['red', 'blue', 'green', 'black']:
+    for color in SUPPORTED_COLORS:
         text = re.sub(f'%{color}%([^%]+)', 
                      rf'<span style="color: {color};">\1</span>', 
                      text)
@@ -108,8 +144,9 @@ def pm2md(pm_dir: str, filename: str, pages: Dict[str, Set[str]]) -> str:
     text = re.sub(r'\(:comment(.*):\)', r'<!--- \1 --->', text)
     text = re.sub(r'\{\#(.*)\#\}', r'<!--- \1 --->', text, flags=re.DOTALL)
 
-    # Process tables and directives
-    lines = text.split('\n')
+    return text
+
+def process_blocks(lines: List[str]) -> List[str]:
     row = 0
     while row < len(lines):
         if re.match(r'\|\|[^|].*', lines[row]):
@@ -117,22 +154,12 @@ def pm2md(pm_dir: str, filename: str, pages: Dict[str, Set[str]]) -> str:
         elif re.match(r'\(\:(.*?)\:\)', lines[row]):
             lines, row = convert_directives(lines, row)
         row += 1
+    return lines
 
-    # Process line breaks
-    row = 0
-    while row < len(lines):
-        if lines[row] == '\\':
-            lines[row] = ''
-            if row + 1 < len(lines) and lines[row + 1].startswith('#'):
-                lines.insert(row, '')
-        elif lines[row].endswith('\\'):
-            lines[row] = lines[row][:-1]
-        row += 1
-
-    # Restore code blocks
+def restore_code_blocks(lines: List[str], codes: List[str]) -> List[str]:
     rows_code = []
     for i in range(len(lines)):
-        if lines[i] == "XXXCODEBLOCKXXX":
+        if lines[i] == CODE_BLOCK_MARKER:
             lines[i] = codes.pop(0)
             rows_code.append(i)
 
@@ -146,7 +173,7 @@ def pm2md(pm_dir: str, filename: str, pages: Dict[str, Set[str]]) -> str:
         lines.insert(end_idx + 1 + insert_count, "```")
         insert_count += 1
 
-    return '\n'.join(lines)
+    return lines
 
 def find_consecutive(xs: List[int]) -> List[Tuple[int, int]]:
     if not xs:
@@ -161,6 +188,17 @@ def find_consecutive(xs: List[int]) -> List[Tuple[int, int]]:
     return result
 
 def convert_link(link: str, linktext: str, filename: str, pages: Dict[str, Set[str]]) -> str:
+    """Convert PmWiki link format to Markdown link format.
+    
+    Args:
+        link: The target of the link
+        linktext: The display text for the link
+        filename: Current file being processed
+        pages: Dictionary of available pages
+    
+    Returns:
+        Markdown formatted link
+    """
     link = link.strip() if link else None
     linktext = linktext.strip() if linktext else None
     
@@ -204,7 +242,7 @@ def convert_link(link: str, linktext: str, filename: str, pages: Dict[str, Set[s
 
     full_link = '/'.join(full_link)
     suffix = full_link.split('.')[-1].lower()
-    is_image = suffix in ('png', 'jpg', 'jpeg', 'tif', 'tiff')
+    is_image = suffix in IMAGE_EXTENSIONS
     
     full_link = full_link.replace(' ', '%20')
     
