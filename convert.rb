@@ -1,7 +1,25 @@
 
 def pm2md(pm_dir, filename, pages)
   text = File.read("#{pm_dir}/#{filename}")
+
+  # preformatted text (eg. code block) is not touched
+  lines = text.split("\n")
+  codes = []
+  iscode = false
+  for row in 0..lines.length-1
+    if lines[row].start_with?(" ") or (iscode and lines[row].empty?)
+      iscode = true
+      codes.push(lines[row])
+      lines[row] = "XXXCODEBLOCKXXX"
+    else
+      iscode = false
+    end
+  end
+  text = lines.join("\n")
+
   tab = "  "
+  # remove unsupported format
+  # text.gsub!()
   # bullet points
   text.gsub!(/^(\h*)(\*+) ?(.*)/) { |t| space = " " * $1.length; indent = tab * ($2.length - 1); space + indent + "- " + $3}
   # order list
@@ -18,10 +36,10 @@ def pm2md(pm_dir, filename, pages)
   text.gsub!(/(?<!')'{3}([^']+)'{3}(?!')/) {"**" + $1.strip + "**"}
   # bold italics
   text.gsub!(/(?<!')'{4}([^']+)'{4}(?!')/) {"***" + $1.strip + "***"}
-  # monospace [@..@], @@..@@, or @..@
+  # monospace [@..@] and @@..@@ into inline monospace
   text.gsub!(/(?<!\[)\[\@{1}([^\]\@]+)\@{1}\](?!\])/) {"`" + $1.strip + "`"}
   text.gsub!(/(?<!\[)\@{2}([^\]\@]+)\@{2}(?!\])/) {"`" + $1.strip + "`"}
-  text.gsub!(/(?<!\[)\@{1}([^\]\@]+)\@{1}(?!\])/) {"`" + $1.strip + "`"}
+  # text.gsub!(/(?<!\[)\@{1}([^\]\@]+)\@{1}(?!\])/) {"`" + $1.strip + "`"}
   # large text
   # TODO potentially match across multiple [+ +]
   # text.gsub!(/\[\+([^\]]*)\+\]/) { "## " + $1 } 
@@ -55,11 +73,13 @@ def pm2md(pm_dir, filename, pages)
 
   
   # single word color
-  text.gsub!(/%red%\s(\S+)/) {"<span style=\"color: red;\">%s</span>" % $1}
-  text.gsub!(/%blue%\s(\S+)/) {"<span style=\"color: blue;\">%s</span>" % $1}
-  text.gsub!(/%green%\s(\S+)/) {"<span style=\"color: green;\">%s</span>" % $1}
-  text.gsub!(/%theosred%\s(\S+)/) {"<span style=\"color: #d21f15;\">%s</span>" % $1}
+  text.gsub!(/%red%([^%]+)/) {"<span style=\"color: red;\">%s</span>" % $1}
+  text.gsub!(/%blue%([^%]+)/) {"<span style=\"color: blue;\">%s</span>" % $1}
+  text.gsub!(/%green%([^%]+)/) {"<span style=\"color: green;\">%s</span>" % $1}
+  text.gsub!(/%black%([^%]+)/) {"<span style=\"color: black;\">%s</span>" % $1}
 
+  # preprocess link
+  text.gsub!(/\(Attach\:\)/, "Attach:")
   # anchor [[#anchor]]  
   text.gsub!(/\[\[\s*#([^\|\s]+)\s*\]\]/) {"<a id=\"%s\"></a>" % $1}
 
@@ -87,7 +107,15 @@ def pm2md(pm_dir, filename, pages)
     convert_link(link, nil, filename, pages)
   end
 
-  # comment that will not shown
+  # %newwin% will set the link so that browser will open up a new windows
+  # when user clicks. Remove it as it markdown has no specification.
+  text.gsub!("%newwin%", "")
+  text.gsub!("%newin%", "")
+
+  # some email address is not included in the link
+  text.gsub!("mailto:", "")
+
+  # comments
   # (:if false) ... (:ifend:)
   text.gsub!(/\(:if false:\)(.*)\(:ifend:\)/m) {"<!--- %s --->" % $1.strip}
   # (:if false) ....
@@ -95,12 +123,13 @@ def pm2md(pm_dir, filename, pages)
   # (:comment ... :)
   text.gsub!(/\(:comment(.*):\)/) {"<!--- %s --->" % $1.strip}
   # {# ... #}
-  text.gsub!(/\{\#(.*)\#\}/) {"<!--- %s --->" % $1.strip}
+  text.gsub!(/\{\#(.*)\#\}/m) {"<!--- %s --->" % $1.strip}
 
   # break into lines for tables and other post prcocessing
   lines = text.split("\n")
   row = 0
   while row < lines.length
+    # table ||
     if lines[row].start_with?(/\|\|[^|].*/)
       lines, row = convert_table(lines, row)
     end
@@ -111,28 +140,79 @@ def pm2md(pm_dir, filename, pages)
     row += 1
   end
 
-  # convert breaklinbe "\" into <br>
   row = 0
-  while row < lines.length - 1
+  while row < lines.length
     if lines[row] == "\\"
-      lines[row] = "<br>"
+      # Unlike standard md, wiki.js renders a breakline when there is only
+      # 1 breakline, so one linebreak is enough.
+      # convert breaklinbe "\" into blank line
+      lines[row] = ""
       if lines[row + 1].start_with?(/\#{1,}/)
         puts ">>>"
         lines.insert(row, "")
       end
+    elsif lines[row].end_with?("\\")
+      # delete trailing "\"
+      lines[row] = lines[row][0..-2]
     end
+
     row += 1
+  end
+
+  # swap back code blocks
+  rows_code = []
+  for i in 0..lines.length-1
+    if lines[i] == "XXXCODEBLOCKXXX"
+      lines[i] = codes.shift()
+      rows_code.push(i)
+    end
+  end
+
+  def find_consecutive(xs)
+    if xs.empty?
+      return []
+    end
+    result = []
+
+    start = 0
+    for i in 1..xs.length-1
+      if xs[i] != xs[i-1] + 1
+        result.push([start, i-1])
+        start = i
+      end
+    end
+
+    result.push([start, xs.length-1])
+    return result
+  end
+
+  # insert ``` to format code block
+  insert_count = 0
+  for rs in find_consecutive(rows_code)
+    start = rows_code[rs[0]]
+    fin = rows_code[rs[1]]
+    lines.insert(start+insert_count, "```")
+    insert_count += 1
+    lines.insert(fin+1+insert_count, "```")
+    insert_count += 1
   end
 
   text = lines.join("\n")
   return text
 end
 
+# def isimage?(file)
+#   puts file
+#   return file.downcase.end_with?("png", "jpg", "jpeg", "tif", "tiff")
+# end
+
 def convert_directives(lines, row)
   directive = /\(\:(.*?)\:\)/.match(lines[row])[1]
   cur_row = row
   if directive.start_with?("table")
     lines, row = table_directive(lines, row)
+  # elsif directive.start_with?("if false")
+  #   lines, row = comment_directive(lines, row)
   else
     lines.delete_at(cur_row)
     row -=1
@@ -213,6 +293,20 @@ def table_directive(lines, row)
   return lines, row
 end
 
+def comment_directive(lines, row)
+  # turn hidden comment into visible strike-through
+  # TODO is there similar features in md?
+  lines.delete_at(row)
+  while lines[row] != "(:ifend:)"
+    t = lines[row].empty? ? "" : "~~%s~~" % lines[row]
+    lines[row] = t
+    row += 1
+  end
+  lines.delete_at(row)
+  row -=1
+  return lines, row
+end
+
 def convert_table(lines, row)
   puts "converting table"
   puts row
@@ -247,10 +341,10 @@ end
 def convert_link(link, linktext, filename, pages)
   # pmwiki will trim all white space for link
   # TODO double check on attachments
-  link = link.gsub(/\s+/, "") 
+  link = link.nil? ? nil : link.strip
   linktext = linktext.nil? ? nil : linktext.strip
   full_link = []
-  if link.include? "Attach"
+  if link.start_with? "Attach:"
     full_link = ["/uploads"]
     # link to files in uploads
     # the link can point to files under another note eg. Attach:Main.links/logo.png
@@ -265,6 +359,9 @@ def convert_link(link, linktext, filename, pages)
       file = link.split(":")[1..-1].join
       full_link.push(file)
     end
+  elsif link.start_with? "mailto:"
+    link = link.gsub!("mailto:", "")
+    full_link = [link]
   elsif link.match? /http|www/
     # link to external site
     full_link = [link]
@@ -277,13 +374,16 @@ def convert_link(link, linktext, filename, pages)
     if link.include? "."
       book = link.split(".")[0]
       page = link.split(".")[1..-1].join + ".md"
+    elsif link.include? "/"
+      book = link.split("/")[0]
+      page = link.split("/")[1..-1].join + ".md"
     else
       book, page = which_book(pages, link)
-      page = link + ".md"
+      page = page + ".md"
       if link.empty? or book.empty?
-        puts ">>> link: %s book: %s" % [link, book]
+        puts ">>> empty link in %s" % [filename]
       end
-            end
+    end
     full_link = ["/"+book, page]
   end
   # no linktext or omitted linktext
@@ -306,11 +406,11 @@ def convert_link(link, linktext, filename, pages)
   end
 end
 
-# configure
-pm_dir = ...              # directory of pmwiki file
-md_dir = ...              # directory to save converted markdowns
-link_excludes = Set[...]  # files to ignore when resolving links
-parse_excludes = Set[...] # files to ignore for conversion
+# user defined
+pm_dir = "./pmwiki"
+md_dir = "./markdown"
+link_excludes = Set[""]
+parse_excludes = Set[""]
 
 
 # preprocess
@@ -328,9 +428,13 @@ for filename in Dir.entries(pm_dir).select { |f| File.file? File.join(pm_dir, f)
 end
 
 def which_book(pages, page)
-  # pmwiki will strip space and "_", and ignore casewhen finding the linked page
+  # pmwiki will strip space and "_", and ignore case when finding the linked page
   page_mod = page.downcase
   page_mod = page_mod.gsub("_", "")
+  page_mod = page_mod.gsub("(", "")
+  page_mod = page_mod.gsub(")", "")
+  page_mod = page_mod.gsub(/\s/, "")
+
   for (k, v) in pages
     for p in v
       if p.downcase == page_mod
